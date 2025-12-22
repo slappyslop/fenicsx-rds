@@ -23,9 +23,9 @@ def initialize_peturbation(functionSpace, initial):
     '''Creates a function with a small random peturbation around initial'''
     function = fem.Function(functionSpace)
     if initial == 0:
-        function.x.array[:] = 0.01 * (np.random.rand(len(function.x.array)) - 0.5)
+        function.x.array[:] = 0.001 * (np.random.rand(len(function.x.array)) - 0.5)
     else:
-        function.x.array[:] = initial + 0.01 * initial * (np.random.rand(len(function.x.array[:])) - 0.5)
+        function.x.array[:] = initial + 0.001 * initial * (np.random.rand(len(function.x.array[:])) - 0.5)
     return function
 
 def compute_norm(new, old):
@@ -70,8 +70,9 @@ W = fem.functionspace(domain, mixed_element([V.ufl_element(), V.ufl_element(), V
 D = fem.functionspace(domain, ("CG", 1, (domain.geometry.dim,)))
 X0 = params.x1_star
 Y0 = params.y1_star
-X2_0 = 0 # change maybe
-Y2_0 = 0  # change maybe
+
+X2_0 = params.x2_star # change maybe
+Y2_0 = params.y2_star  # change maybe
 intial_values = [X0, Y0, X2_0, Y2_0]
 
 
@@ -122,10 +123,10 @@ v_out = fem.Function(V)
 u2_out = fem.Function(V)
 v2_out = fem.Function(V)
 
-writer_u = VTXWriter(domain.comm, "hemisphere_vtx/out_u.bp", [u_out])
-writer_v = VTXWriter(domain.comm, "hemisphere_vtx/out_v.bp", [v_out])
-writer_u2 = VTXWriter(domain.comm, "hemisphere_vtx/out_u2.bp", [u2_out])
-writer_v2 = VTXWriter(domain.comm, "hemisphere_vtx/out_v2.bp", [v2_out])
+writer_u = VTXWriter(domain.comm, "hemisphere_vtx_alt/out_u.bp", [u_out])
+writer_v = VTXWriter(domain.comm, "hemisphere_vtx_alt/out_v.bp", [v_out])
+writer_u2 = VTXWriter(domain.comm, "hemisphere_vtx_alt/out_u2.bp", [u2_out])
+writer_v2 = VTXWriter(domain.comm, "hemisphere_vtx_alt/out_v2.bp", [v2_out])
 
 t = 0
 step = 0
@@ -166,18 +167,18 @@ while t < params.T:
     L2normV2.append(norm_v2)
     for l2n, n in zip([L2normU, L2normV, L2normU2, L2normV2], [norm_u, norm_v, norm_u2, norm_v2]):
         l2n.append(n)
-
     if step % 50 == 0:
         print(f"Step {step}, t = {t:.3f}, Newton iterations = {n}")
-        if t > 100:
+        if t > 120:
             vertex_normals = compute_normals(domain)
             growth_values = u2_out.x.array
             deformation = params.c_g * growth_values[:, None] * vertex_normals
             domain.geometry.x[:]   += deformation
+            pass
         for writer in [writer_u, writer_v, writer_u2, writer_v2]:
             writer.write(t)
         
-
+    
     # Update previous solution for next step
     w0.x.array[:] = w.x.array
 
