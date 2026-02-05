@@ -5,6 +5,7 @@ import ufl
 from mpi4py import MPI
 from dolfinx.io import VTXWriter, XDMFFile
 from basix.ufl import mixed_element
+from ufl import div, grad, inner, dot
 import dolfinx.fem.petsc
 import dolfinx.nls.petsc
 import matplotlib.pyplot as plt
@@ -59,7 +60,79 @@ def compute_normals(mesh: dolfinx.mesh.Mesh):
     norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
     vertex_normals /= norms + 1e-14
     return vertex_normals
+
+k_s = 2 
+k_b = 0
+k_pu = 2
+k_pv = -2
+
+def material_velocity(k_s: float, k_b: float, k_pu: float, k_pv:float, u: fem.Function, v: fem.Function, surface_sp:fem.FunctionSpace, timestep: float) -> fem.Function: 
+    """
+    TAKEN FROM SOPHIE'S CODE
+    k_s:   tension parameter
+    k_b: bending rigidity
+    u: vector containing chemical species u (u[0]) and v (u[1])
+
+    returns a scalar function on the boundary of the volume and the next lambda
+    V = chemical action - surface tension + volume lambda (+ bending energy)
+
+    ref for curvature stuff and normal vector: https://fenicsproject.discourse.group/t/normal-vector-in-manifold/14160/2
+    """
+    surface_mesh = surface_sp.mesh
+    dM = ufl.dx(domain=surface_mesh)
+    n = ufl.CellNormal(surface_mesh)
+    x = ufl.SpatialCoordinate(surface_mesh)
+    r = x/ufl.sqrt(ufl.dot(x, x))
+    sign = ufl.sign(ufl.dot(n, r))
+    n_oriented = sign*n
+    w= 1000/8000
     
+
+    # set-up for normal vector and curvature computation
+    V1 = fem.functionspace(surface_mesh, ("Lagrange", 2, (surface_mesh.geometry.dim,)))
+    # V2 = functionspace(surface_mesh, ("Lagrange", 2))
+    normal_expr = fem.Expression(n_oriented, V1.element.interpolation_points())
+    normal_vec = fem.Function(V1)
+    velo_temp = fem.Function(V1)
+    velo = fem.Function(V1)
+
+    H_expr = fem.Expression(1/2*div(sign*n), surface_sp.element.interpolation_points())
+    grad_sq_expr = fem.Expression(inner(grad(n), grad(n)), surface_sp.element.interpolation_points(), MPI.COMM_WORLD)
+    H = fem.Function(surface_sp)
+    grad_sq = fem.Function(surface_sp)
+
+    normal_vec.interpolate(normal_expr)
+    H.interpolate(H_expr)
+    grad_sq.interpolate(grad_sq_expr) 
+
+
+    # set-up the constants
+    k_s = fem.Constant(surface_mesh, dolfinx.default_scalar_type(k_s))  # Constant(domain, default_scalar_type(0.3))
+    k_b = fem.Constant(surface_mesh, dolfinx.default_scalar_type(k_b))
+    k_pu = fem.Constant(surface_mesh, dolfinx.default_scalar_type(k_pu))
+    k_pv = fem.Constant(surface_mesh, dolfinx.default_scalar_type(k_pv))
+    
+    # the normal velocity as in the paper and the docstring
+    velo_temp_expr =fem.Expression(w*timestep*(k_pu * (u) + k_pv * v -k_s*H + k_b * (div(grad(H))-1/2*H**3 + dot(H, grad_sq)))*n, V1.element.interpolation_points()) #div(grad(H))
+    velo_temp.interpolate(velo_temp_expr)
+
+    lambda_proxy = fem.assemble_scalar(fem.form(dot(velo_temp, n) * dM)) / fem.assemble_scalar(fem.form(1 * dM))
+    velo_expr = fem.Expression(velo_temp - lambda_proxy*n, V1.element.interpolation_points())
+    velo.interpolate(velo_expr)
+    return velo
+
+def deform_mesh(V: fem.FunctionSpace, u: fem.Function):
+    """Deforms the mesh according to a function u:
+    Currently adds on u, tested with the normal vector."""
+    mesh = V.mesh
+    gdim = mesh.geometry.dim
+    V_geom = fem.functionspace(mesh, ("Lagrange", 1, (gdim,)))
+
+    v_linear = fem.Function(V_geom)
+    v_linear.interpolate(u)
+
+    deformation_array = v_linear.x.array.reshape((-1, gdim))
+    mesh.geometry.x[:, :gdim] += deformation_array
 
 
 with XDMFFile(MPI.COMM_WORLD, "out_gmsh/hemisphere.xdmf", "r") as xdmf:
@@ -71,8 +144,8 @@ D = fem.functionspace(domain, ("CG", 1, (domain.geometry.dim,)))
 X0 = params.x1_star
 Y0 = params.y1_star
 
-X2_0 = params.x2_star # change maybe
-Y2_0 = params.y2_star  # change maybe
+X2_0 = 0# change maybe
+Y2_0 = 0  # change maybe
 intial_values = [X0, Y0, X2_0, Y2_0]
 
 
@@ -123,10 +196,10 @@ v_out = fem.Function(V)
 u2_out = fem.Function(V)
 v2_out = fem.Function(V)
 
-writer_u = VTXWriter(domain.comm, "hemisphere_vtx_alt/out_u.bp", [u_out])
-writer_v = VTXWriter(domain.comm, "hemisphere_vtx_alt/out_v.bp", [v_out])
-writer_u2 = VTXWriter(domain.comm, "hemisphere_vtx_alt/out_u2.bp", [u2_out])
-writer_v2 = VTXWriter(domain.comm, "hemisphere_vtx_alt/out_v2.bp", [v2_out])
+writer_u = VTXWriter(domain.comm, "hemisphere_esfem/out_u.bp", [u_out])
+writer_v = VTXWriter(domain.comm, "hemisphere_esfem/out_v.bp", [v_out])
+writer_u2 = VTXWriter(domain.comm, "hemisphere_esfem/out_u2.bp", [u2_out])
+writer_v2 = VTXWriter(domain.comm, "hemisphere_esfem/out_v2.bp", [v2_out])
 
 t = 0
 step = 0
@@ -141,7 +214,14 @@ deformation_array = u_d.x.array.reshape((-1, D.mesh.geometry.dim))
 while t < params.T:
     t += params.dt
     step += 1
-    
+
+    if t > 120:
+        velo = material_velocity(0.5, k_b, params.c_g, -params.c_g, u=w0.sub(2), v=w0.sub(3), surface_sp=V, timestep=params.dt)
+        deform_mesh(V, velo);
+        problem = dolfinx.fem.petsc.NonlinearProblem(F, w, bcs = bcs)
+        solver = dolfinx.nls.petsc.NewtonSolver(domain.comm, problem)
+        solver.rtol = 1e-6
+
     n, converged = solver.solve(w)
     if not converged:
         print(f"Step {step}: Newton solver,   failed to converge")
@@ -169,12 +249,6 @@ while t < params.T:
         l2n.append(n)
     if step % 50 == 0:
         print(f"Step {step}, t = {t:.3f}, Newton iterations = {n}")
-        if t > 120:
-            vertex_normals = compute_normals(domain)
-            growth_values = u2_out.x.array
-            deformation = params.c_g * growth_values[:, None] * vertex_normals
-            domain.geometry.x[:]   += deformation
-            pass
         for writer in [writer_u, writer_v, writer_u2, writer_v2]:
             writer.write(t)
         
