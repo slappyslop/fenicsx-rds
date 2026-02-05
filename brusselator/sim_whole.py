@@ -68,7 +68,7 @@ k_pv = -2
 
 def material_velocity(k_s: float, k_b: float, k_pu: float, k_pv:float, u: fem.Function, v: fem.Function, surface_sp:fem.FunctionSpace, timestep: float) -> fem.Function: 
     """
-    TAKEN FROM SOPHIE'S CODE
+    REPURPOSED FROM SOPHIE'S CODE
     k_s:   tension parameter
     k_b: bending rigidity
     u: vector containing chemical species u (u[0]) and v (u[1])
